@@ -1,0 +1,48 @@
+name: NetEase Cloud Music Daily Sign
+
+on:
+  schedule:
+    # UTC 20:00 == 北京时间次日 04:00
+    - cron: '0 20 * * *'
+  workflow_dispatch:
+  push:
+    branches: [ master ]
+    paths:
+      - 'scripts/netease-sign.js'
+      - '.github/workflows/netease-sign.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: netease-sign
+  cancel-in-progress: false
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run NetEase sign-in
+        env:
+          MUSIC_U: ${{ secrets.MUSIC_U }}
+          NETEASE_CSRF: ${{ secrets.NETEASE_CSRF }}
+          LISTEN_COUNT: ${{ vars.NETEASE_LISTEN_COUNT || '0' }}
+        run: node scripts/netease-sign.js
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: netease-sign-result
+          path: sign-result.json
+          if-no-files-found: ignore
+          retention-days: 14
