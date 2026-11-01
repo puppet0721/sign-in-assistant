@@ -93,7 +93,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  */
 async function pushServerChan(payload) {
   const key = (process.env.SERVERCHAN_KEY || '').trim();
-  if (!key) return { skipped: 'no SERVERCHAN_KEY' };
+  if (!key) {
+    log('[notify] 跳过：SERVERCHAN_KEY 未设置');
+    return { skipped: 'no SERVERCHAN_KEY' };
+  }
   try {
     const body = new URLSearchParams({
       title: payload.title.slice(0, 32),
@@ -159,11 +162,34 @@ async function main() {
   log('[level] 等级 ' + level + '，累计听歌 ' + result.nowPlayCount);
 
   // 2) 每日签到(type=0) + 云贝签到(type=1)
+  //    已知返回：code=200 成功 / -2 重复签到（今天已签） / 403 请稍后再试（频率限制）
   for (const [label, type] of [['daily_signin', 0], ['yunbei_sign', 1]]) {
-    const r = await weapi('/weapi/point/dailyTask', { type }, cookie);
-    const row = { task: label, type, code: r.code, point: r.point ?? null, msg: r.message || r.msg || '' };
+    let r;
+    let attempt = 0;
+    for (let i = 0; i < 3; i++) {
+      attempt = i + 1;
+      r = await weapi('/weapi/point/dailyTask', { type }, cookie);
+      // 403 / -460 属于限流，退避后重试；200 与 -2 是终态
+      if (r.code === 403 || r.code === -460) {
+        const wait = 3000 + i * 4000;
+        log('[' + label + '] code=' + r.code + '（' + (r.message || r.msg || '限流') + '），' + (wait / 1000) + 's 后重试 ' + (i + 1) + '/3');
+        await sleep(wait);
+        continue;
+      }
+      break;
+    }
+    const row = {
+      task: label,
+      type,
+      code: r.code,
+      point: r.point ?? null,
+      msg: r.message || r.msg || '',
+      attempt,
+      // 200 = 签成功；-2 = 今天已签过。两种都不算异常
+      done: r.code === 200 || r.code === -2,
+    };
     result.steps.push(row);
-    log('[' + label + '] code=' + row.code + (row.point !== null ? ' point=' + row.point : '') + (row.msg ? ' msg=' + row.msg : ''));
+    log('[' + label + '] code=' + row.code + (row.point !== null ? ' point=' + row.point : '') + (row.msg ? ' msg=' + row.msg : '') + (row.done ? '' : '  ⚠ 未完成'));
     await sleep(900 + Math.random() * 800);
   }
 
@@ -198,7 +224,7 @@ async function main() {
     }
   }
 
-  const okSteps = result.steps.filter((s) => s.code === 200 || s.reported > 0 || s.skipped);
+  const okSteps = result.steps.filter((s) => s.done || s.reported > 0 || s.skipped);
   result.ok = okSteps.length > 0 && result.errors.length === 0;
   log('\n===== 汇总 =====');
   log(JSON.stringify(result, null, 2));
@@ -206,10 +232,18 @@ async function main() {
   fs.writeFileSync('sign-result.json', JSON.stringify(result, null, 2));
 
   // 汇总文本（给推送用）
+  const signLabel = (s) => {
+    if (s.code === 200) return s.point !== null ? '成功，+' + s.point : '成功';
+    if (s.code === -2) return '今日已签';
+    return '失败 ' + s.code + (s.msg ? '（' + s.msg + '）' : '');
+  };
   const lines = result.steps.map((s) => {
-    if (s.task === 'daily_signin') return '- 每日签到：code ' + s.code + (s.msg ? '（' + s.msg + '）' : '');
-    if (s.task === 'yunbei_sign') return '- 云贝签到：code ' + s.code + (s.point !== null ? '，获得 ' + s.point + ' 云贝' : '') + (s.msg ? '（' + s.msg + '）' : '');
-    if (s.task === 'listen_songs') return s.skipped ? '- 听歌：跳过（等级已满）' : '- 听歌：' + s.reported + '/' + s.target + ' 首';
+    if (s.task === 'daily_signin') return '- 每日签到：' + signLabel(s);
+    if (s.task === 'yunbei_sign') {
+      const extra = s.code === 200 && s.point !== null ? '，+' + s.point + ' 云贝' : '';
+      return '- 云贝签到：' + signLabel(s) + extra;
+    }
+    if (s.task === 'listen_songs') return s.skipped ? '- 听歌：跳过（等级已满 10 级）' : '- 听歌：上报 ' + s.reported + '/' + s.target + ' 首';
     return '- ' + JSON.stringify(s);
   });
   const desp = [
@@ -219,13 +253,13 @@ async function main() {
     '### 任务结果',
     ...lines,
     '',
-    '运行时间：' + result.time,
+    '运行时间：' + result.time.replace('T', ' ').replace('.000Z', ' UTC').replace('Z', ' UTC'),
   ].join('\n');
 
   await pushServerChan({
-    title: (result.ok ? '✅' : '⚠️') + ' 网易云签到 ' + (result.ok ? '完成' : '异常'),
+    title: (result.ok ? '✅' : '⚠️') + ' 网易云签到' + (result.ok ? '完成' : '异常'),
     desp,
-    short: result.steps.filter((s) => s.point !== null).map((s) => s.task + '+' + s.point).join(' ') || '已执行',
+    short: result.steps.map((s) => s.task.replace('_signin', '').replace('_sign', '').replace('_songs', '') + ':' + (s.done ? 'ok' : s.reported !== undefined ? s.reported : 'no')).join(' ').slice(0, 64),
   });
 
   if (!result.ok) process.exitCode = 4;
