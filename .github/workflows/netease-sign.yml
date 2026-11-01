@@ -35,6 +35,7 @@ jobs:
         env:
           MUSIC_U: ${{ secrets.MUSIC_U }}
           NETEASE_CSRF: ${{ secrets.NETEASE_CSRF }}
+          SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
           LISTEN_COUNT: ${{ vars.NETEASE_LISTEN_COUNT || '0' }}
         run: node scripts/netease-sign.js
 
@@ -46,3 +47,16 @@ jobs:
           path: sign-result.json
           if-no-files-found: ignore
           retention-days: 14
+
+      - name: Notify on workflow failure
+        if: failure()
+        env:
+          SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
+        run: |
+          if [ -z "$SERVERCHAN_KEY" ]; then
+            echo "no SERVERCHAN_KEY, skip"
+            exit 0
+          fi
+          curl -sS -X POST "https://sctapi.ftqq.com/${SERVERCHAN_KEY}.send" \
+            --data-urlencode "title=🔴 网易云签到 Workflow 失败" \
+            --data-urlencode "desp=仓库: ${{ github.repository }}%0A运行: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}%0A请检查 Actions 日志。"
