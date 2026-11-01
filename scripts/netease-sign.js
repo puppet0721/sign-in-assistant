@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 网易云音乐每日签到 / 云贝签到 — GitHub Actions 版
+ * 网易云音乐每日签到 / 云贝签到 / 听歌上报 — GitHub Actions 版
  *
  * 为什么不用仓库原版 signin/scripts/wangyi.py：
  *   它直接明文 POST JSON 到 /weapi/*，缺少 params + encSecKey 加密层，
@@ -8,9 +8,10 @@
  *   本脚本按网易云前端 asrsea 逻辑补齐 AES-128-CBC 双层 + RSA 裸模幂加密。
  *
  * 环境变量：
- *   MUSIC_U        必填，网易云 Cookie 里的 MUSIC_U 值（也接受完整 cookie 串）
- *   NETEASE_CSRF   可选，__csrf 值
- *   LISTEN_COUNT   可选，听歌上报条数，默认 0（不跑）
+ *   MUSIC_U          必填，网易云 Cookie 里的 MUSIC_U 值（也接受完整 cookie 串）
+ *   NETEASE_CSRF     可选，__csrf 值
+ *   LISTEN_COUNT     可选，听歌上报条数，默认 0
+ *   SERVERCHAN_KEY   可选，Server酱 SendKey，填了就推送微信
  */
 
 const crypto = require('crypto');
@@ -76,7 +77,6 @@ function buildCookie() {
   const raw = (process.env.MUSIC_U || '').trim();
   if (!raw) return '';
   if (raw.includes('=')) {
-    // 已经是完整 cookie 串
     let c = raw.replace(/^\s*cookie:\s*/i, '').trim();
     if (c.includes('MUSIC_U')) return c;
     return c + '; MUSIC_U=' + c.split('=').slice(1).join('=');
@@ -88,6 +88,33 @@ function buildCookie() {
 const log = (s) => console.log(s);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Server酱推送。失败只记日志，绝不影响签到本身的退出码。
+ */
+async function pushServerChan(payload) {
+  const key = (process.env.SERVERCHAN_KEY || '').trim();
+  if (!key) return { skipped: 'no SERVERCHAN_KEY' };
+  try {
+    const body = new URLSearchParams({
+      title: payload.title.slice(0, 32),
+      desp: payload.desp,
+      short: (payload.short || '').slice(0, 64),
+    }).toString();
+    const res = await fetch('https://sctapi.ftqq.com/' + key + '.send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body,
+    });
+    const json = await res.json().catch(() => ({}));
+    const ok = json && json.code === 0;
+    log('[notify] Server酱 ' + (ok ? '已推送 pushid=' + (json.data && json.data.pushid || '?') : '失败 ' + JSON.stringify(json).slice(0, 120)));
+    return { ok, json };
+  } catch (e) {
+    log('[notify] Server酱 请求异常: ' + e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
 async function main() {
   const cookie = buildCookie();
   const listenCount = parseInt(process.env.LISTEN_COUNT || '0', 10) || 0;
@@ -97,6 +124,11 @@ async function main() {
     log('::error::缺少 MUSIC_U。请在仓库 Settings → Secrets and variables → Actions 里添加 secret MUSIC_U。');
     result.errors.push('missing MUSIC_U');
     fs.writeFileSync('sign-result.json', JSON.stringify(result, null, 2));
+    await pushServerChan({
+      title: '❌ 网易云签到失败：缺少 MUSIC_U',
+      desp: 'Actions secret `MUSIC_U` 未设置。',
+      short: '缺少 MUSIC_U',
+    });
     process.exitCode = 2;
     return;
   }
@@ -108,6 +140,11 @@ async function main() {
     log('::error::登录态无效（' + why + '），MUSIC_U 已过期，请更新 secret。');
     result.errors.push('auth failed: ' + why);
     fs.writeFileSync('sign-result.json', JSON.stringify(result, null, 2));
+    await pushServerChan({
+      title: '❌ 网易云签到失败：Cookie 失效',
+      desp: 'MUSIC_U 登录态无效（' + why + '）。\n\n请更新 Actions secret `MUSIC_U`。',
+      short: 'MUSIC_U 已过期',
+    });
     process.exitCode = 3;
     return;
   }
@@ -130,24 +167,34 @@ async function main() {
     await sleep(900 + Math.random() * 800);
   }
 
-  // 3) 可选听歌上报（走 feedback/weblog，不是 404 的 play/song/record）
+  // 3) 听歌上报（走 feedback/weblog，不是 404 的 play/song/record）
+  //    歌曲来源：热歌榜歌单（playlist/detail），因为 recommend/songs 对部分账号返回空
   if (listenCount > 0) {
     if (level >= 10) {
       log('[listen] 等级已满 10 级，跳过');
       result.steps.push({ task: 'listen_songs', skipped: 'level>=10' });
     } else {
-      const rec = await weapi('/weapi/v1/discovery/recommend/songs', {}, cookie);
-      const songs = (rec?.data?.dailySongs || []).slice(0, listenCount);
-      log('[listen] 推荐 ' + (rec?.data?.dailySongs || []).length + ' 首，本次上报 ' + songs.length);
+      const PLAYLIST_ID = parseInt(process.env.LISTEN_PLAYLIST_ID || '3778678', 10) || 3778678;
+      const pl = await weapi('/weapi/v3/playlist/detail', { id: PLAYLIST_ID, n: 1000 }, cookie);
+      const tracks = (pl?.playlist?.tracks || []).filter((t) => t && t.id);
+      log('[listen] 歌单 ' + (pl?.playlist?.name || PLAYLIST_ID) + ' 取到 ' + tracks.length + ' 首，目标上报 ' + listenCount + ' 首');
+      if (!tracks.length) {
+        log('[listen] 歌单为空，跳过');
+        result.steps.push({ task: 'listen_songs', reported: 0, target: 0, reason: 'playlist empty' });
+      }
       let ok = 0;
-      for (const s of songs) {
-        const logs = [{ action: 'play', json: { id: s.id, type: 'song', vs: '0' }, time: Date.now() }];
+      for (const t of tracks) {
+        if (ok >= listenCount) break;
+        const logs = [{ action: 'play', json: { id: t.id, type: 'song', vs: '0' }, time: Date.now() }];
         const r = await weapi('/weapi/feedback/weblog', { logs: JSON.stringify(logs) }, cookie);
-        if (r.code === 200) ok += 1;
+        if (r.code === 200) {
+          ok += 1;
+          if (ok % 10 === 0) log('[listen] 已上报 ' + ok + ' 首');
+        }
         await sleep(400 + Math.random() * 600);
       }
-      result.steps.push({ task: 'listen_songs', reported: ok });
-      log('[listen] 上报成功 ' + ok + ' 首');
+      result.steps.push({ task: 'listen_songs', reported: ok, target: listenCount });
+      log('[listen] 上报完成 ' + ok + '/' + listenCount + ' 首');
     }
   }
 
@@ -157,6 +204,30 @@ async function main() {
   log(JSON.stringify(result, null, 2));
 
   fs.writeFileSync('sign-result.json', JSON.stringify(result, null, 2));
+
+  // 汇总文本（给推送用）
+  const lines = result.steps.map((s) => {
+    if (s.task === 'daily_signin') return '- 每日签到：code ' + s.code + (s.msg ? '（' + s.msg + '）' : '');
+    if (s.task === 'yunbei_sign') return '- 云贝签到：code ' + s.code + (s.point !== null ? '，获得 ' + s.point + ' 云贝' : '') + (s.msg ? '（' + s.msg + '）' : '');
+    if (s.task === 'listen_songs') return s.skipped ? '- 听歌：跳过（等级已满）' : '- 听歌：' + s.reported + '/' + s.target + ' 首';
+    return '- ' + JSON.stringify(s);
+  });
+  const desp = [
+    '**账号**：' + result.nickname + '（uid ' + result.uid + '）',
+    '**等级**：Lv.' + result.level + '，累计听歌 ' + result.nowPlayCount,
+    '',
+    '### 任务结果',
+    ...lines,
+    '',
+    '运行时间：' + result.time,
+  ].join('\n');
+
+  await pushServerChan({
+    title: (result.ok ? '✅' : '⚠️') + ' 网易云签到 ' + (result.ok ? '完成' : '异常'),
+    desp,
+    short: result.steps.filter((s) => s.point !== null).map((s) => s.task + '+' + s.point).join(' ') || '已执行',
+  });
+
   if (!result.ok) process.exitCode = 4;
   else log('::notice::网易云签到完成');
 }
