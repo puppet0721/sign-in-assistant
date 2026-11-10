@@ -1,4 +1,4 @@
-name: NetEase Cloud Music Daily Sign
+name: Daily Sign (NetEase + AliyunPan)
 
 on:
   schedule:
@@ -9,17 +9,18 @@ on:
     branches: [ master ]
     paths:
       - 'scripts/netease-sign.js'
+      - 'scripts/alipan-sign.js'
       - '.github/workflows/netease-sign.yml'
 
 permissions:
   contents: read
 
 concurrency:
-  group: netease-sign
+  group: daily-sign
   cancel-in-progress: false
 
 jobs:
-  sign:
+  netease:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -39,7 +40,7 @@ jobs:
           LISTEN_COUNT: ${{ vars.NETEASE_LISTEN_COUNT || '0' }}
         run: node scripts/netease-sign.js
 
-      - name: Upload result
+      - name: Upload NetEase result
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -48,15 +49,29 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      - name: Notify on workflow failure
-        if: failure()
+  alipan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run AliyunPan sign-in
         env:
+          ALIPAN_REFRESH_TOKEN: ${{ secrets.ALIPAN_REFRESH_TOKEN }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
-        run: |
-          if [ -z "$SERVERCHAN_KEY" ]; then
-            echo "no SERVERCHAN_KEY, skip"
-            exit 0
-          fi
-          curl -sS -X POST "https://sctapi.ftqq.com/${SERVERCHAN_KEY}.send" \
-            --data-urlencode "title=🔴 网易云签到 Workflow 失败" \
-            --data-urlencode "desp=仓库: ${{ github.repository }}%0A运行: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}%0A请检查 Actions 日志。"
+        run: node scripts/alipan-sign.js
+
+      - name: Upload AliyunPan result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alipan-sign-result
+          path: alipan-result.json
+          if-no-files-found: ignore
+          retention-days: 14
