@@ -1,4 +1,4 @@
-name: Daily Sign (NetEase + AliyunPan + Juejin)
+name: Daily Sign (NetEase + AliyunPan)
 
 on:
   schedule:
@@ -10,7 +10,6 @@ on:
     paths:
       - 'scripts/netease-sign.js'
       - 'scripts/alipan-sign.js'
-      - 'scripts/juejin-sign.js'
       - '.github/workflows/netease-sign.yml'
 
 permissions:
@@ -74,33 +73,5 @@ jobs:
         with:
           name: alipan-sign-result
           path: alipan-result.json
-          if-no-files-found: ignore
-          retention-days: 14
-
-  juejin:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Run Juejin sign-in
-        env:
-          JUEJIN_COOKIE: ${{ secrets.JUEJIN_COOKIE }}
-          JUEJIN_APPEND_URL: ${{ vars.JUEJIN_APPEND_URL || 'aid=2608' }}
-          SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
-        run: node scripts/juejin-sign.js
-
-      - name: Upload Juejin result
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: juejin-sign-result
-          path: juejin-result.json
           if-no-files-found: ignore
           retention-days: 14
