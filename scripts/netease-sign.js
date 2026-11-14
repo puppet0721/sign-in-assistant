@@ -178,18 +178,24 @@ async function main() {
       }
       break;
     }
+    const msg = r.message || r.msg || '';
+    // 重要：code=200 只代表"请求被受理"，不代表签到成功。
+    // 网易云对 type=0 会返回 {code:200, message:"功能暂不支持"}，此时并未签到。
+    const notSupported = /功能暂不支持|暂不支持|not\s*support/i.test(msg);
     const row = {
       task: label,
       type,
       code: r.code,
       point: r.point ?? null,
-      msg: r.message || r.msg || '',
+      msg,
       attempt,
-      // 200 = 签成功；-2 = 今天已签过。两种都不算异常
-      done: r.code === 200 || r.code === -2,
+      notSupported,
+      // 只有真正签上（200 且不是"功能暂不支持"）或今日已签（-2）才算完成
+      done: !notSupported && (r.code === 200 || r.code === -2),
     };
     result.steps.push(row);
-    log('[' + label + '] code=' + row.code + (row.point !== null ? ' point=' + row.point : '') + (row.msg ? ' msg=' + row.msg : '') + (row.done ? '' : '  ⚠ 未完成'));
+    const tag = row.notSupported ? '  ⊘ 接口已下线' : row.done ? '' : '  ⚠ 未完成';
+    log('[' + label + '] code=' + row.code + (row.point !== null ? ' point=' + row.point : '') + (msg ? ' msg=' + msg : '') + tag);
     await sleep(900 + Math.random() * 800);
   }
 
@@ -233,33 +239,40 @@ async function main() {
 
   // 汇总文本（给推送用）
   const signLabel = (s) => {
-    if (s.code === 200) return s.point !== null ? '成功，+' + s.point : '成功';
+    if (s.notSupported) return '接口已下线（功能暂不支持）';
     if (s.code === -2) return '今日已签';
+    if (s.code === 200) return s.point !== null ? '成功，+' + s.point : '成功';
     return '失败 ' + s.code + (s.msg ? '（' + s.msg + '）' : '');
   };
   const lines = result.steps.map((s) => {
     if (s.task === 'daily_signin') return '- 每日签到：' + signLabel(s);
     if (s.task === 'yunbei_sign') {
-      const extra = s.code === 200 && s.point !== null ? '，+' + s.point + ' 云贝' : '';
+      const extra = !s.notSupported && s.code === 200 && s.point !== null ? '，+' + s.point + ' 云贝' : '';
       return '- 云贝签到：' + signLabel(s) + extra;
     }
     if (s.task === 'listen_songs') return s.skipped ? '- 听歌：跳过（等级已满 10 级）' : '- 听歌：上报 ' + s.reported + '/' + s.target + ' 首';
     return '- ' + JSON.stringify(s);
   });
+  // 是否真的签到了（排除"功能暂不支持"）
+  const realSigned = result.steps.some((s) => !s.notSupported && (s.code === 200 || s.code === -2));
   const desp = [
     '**账号**：' + result.nickname + '（uid ' + result.uid + '）',
     '**等级**：Lv.' + result.level + '，累计听歌 ' + result.nowPlayCount,
     '',
     '### 任务结果',
     ...lines,
+    realSigned ? '' : '⚠️ 本次没有实际签到成功，请检查接口状态',
     '',
     '运行时间：' + result.time.replace('T', ' ').replace('.000Z', ' UTC').replace('Z', ' UTC'),
-  ].join('\n');
+  ].filter((x) => x !== null).join('\n');
 
+  const title = !realSigned
+    ? '⚠️ 网易云签到：未签上'
+    : (result.ok ? '✅ 网易云签到完成' : '⚠️ 网易云签到异常');
   await pushServerChan({
-    title: (result.ok ? '✅' : '⚠️') + ' 网易云签到' + (result.ok ? '完成' : '异常'),
+    title,
     desp,
-    short: result.steps.map((s) => s.task.replace('_signin', '').replace('_sign', '').replace('_songs', '') + ':' + (s.done ? 'ok' : s.reported !== undefined ? s.reported : 'no')).join(' ').slice(0, 64),
+    short: result.steps.map((s) => s.task.replace('_signin', '').replace('_sign', '').replace('_songs', '') + ':' + (s.notSupported ? 'off' : s.done ? 'ok' : s.reported !== undefined ? s.reported : 'no')).join(' ').slice(0, 64),
   });
 
   if (!result.ok) process.exitCode = 4;
