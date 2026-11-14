@@ -1,4 +1,4 @@
-name: Daily Sign (NetEase + AliyunPan)
+name: Daily Sign (NetEase)
 
 on:
   schedule:
@@ -9,7 +9,6 @@ on:
     branches: [ master ]
     paths:
       - 'scripts/netease-sign.js'
-      - 'scripts/alipan-sign.js'
       - '.github/workflows/netease-sign.yml'
 
 permissions:
@@ -46,45 +45,5 @@ jobs:
         with:
           name: netease-sign-result
           path: sign-result.json
-          if-no-files-found: ignore
-          retention-days: 14
-
-  alipan:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      # 阿里云盘接口偶发网络抖动（fetch failed），重试 3 次
-      - name: Run AliyunPan sign-in
-        env:
-          ALIPAN_REFRESH_TOKEN: ${{ secrets.ALIPAN_REFRESH_TOKEN }}
-          SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
-        run: |
-          for i in 1 2 3; do
-            echo "=== attempt $i ==="
-            if node scripts/alipan-sign.js; then
-              exit 0
-            fi
-            if [ "$i" -lt 3 ]; then
-              echo "失败，10 秒后重试..."
-              sleep 10
-            fi
-          done
-          echo "三次尝试均失败"
-          exit 1
-
-      - name: Upload AliyunPan result
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: alipan-sign-result
-          path: alipan-result.json
           if-no-files-found: ignore
           retention-days: 14
